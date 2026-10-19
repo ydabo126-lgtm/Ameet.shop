@@ -281,6 +281,7 @@ button{cursor:pointer}
     <div class="logo-sub">Amicale des Élèves et Étudiants de Tanaff</div>
   </div>
 
+  <div id="localWarn" class="hidden" style="background:#fff4df;color:#9a5d00;border-radius:12px;padding:10px 12px;font-size:11px;line-height:1.5;margin-bottom:16px">Mode local : les comptes ne sont enregistrés que sur cet appareil. Renseignez CLOUD_URL dans le code pour les partager entre tous les téléphones.</div>
   <div class="login" id="loginForm">
     <div class="auth-title">Connexion à votre compte</div>
     <div class="auth-desc">Accédez à votre espace AMEET.</div>
@@ -557,7 +558,7 @@ button{cursor:pointer}
   <div class="card prof" id="profCard"></div>
   <div class="card">
     <div style="font-weight:900;font-size:14px;margin-bottom:4px">Mes fichiers</div>
-    <p style="font-size:11px;color:var(--muted);margin-bottom:13px;line-height:1.5">Téléversez votre fiche d'inscription et les documents nécessaires (10 Mo maximum par fichier).</p>
+    <p style="font-size:11px;color:var(--muted);margin-bottom:13px;line-height:1.5">Téléversez votre fiche d'inscription et les documents nécessaires (<span class="maxmb">10</span> Mo maximum par fichier).</p>
     <div class="group"><label>Type de document</label><select id="ufKind" class="input"><option value="">Choisir</option><option>Fiche d'inscription</option><option>Pièce d'identité</option><option>Certificat de scolarité</option><option>Acte de naissance</option><option>Autre document</option></select></div>
     <div class="group"><label>Fichier</label><input id="ufFile" class="input" type="file"></div>
     <button class="btn primary" onclick="uploadUserFile()"><svg class="ic"><use href="#i-upload"/></svg>Téléverser</button>
@@ -645,7 +646,7 @@ button{cursor:pointer}
       <div class="group"><label>Niveau concerné</label><select id="lbNiveau" class="input"><option value="">Tous les niveaux</option><option>Licence 1</option><option>Licence 2</option><option>Licence 3</option><option>Master 1</option><option>Master 2</option><option>Doctorat</option></select></div>
       <div class="group"><label>Filière / département</label><input id="lbFiliere" class="input" placeholder="Vide = toutes les filières"></div>
     </div>
-    <div class="group"><label>Fichier (10 Mo maximum)</label><input id="lbFile" class="input" type="file"></div>
+    <div class="group"><label>Fichier (<span class="maxmb">10</span> Mo maximum)</label><input id="lbFile" class="input" type="file"></div>
     <label class="check-line"><input id="lbNotify" type="checkbox" checked>Notifier les étudiants concernés</label>
     <button class="btn primary" onclick="addLibDoc()"><svg class="ic"><use href="#i-upload"/></svg>Ajouter à la bibliothèque</button>
     <div class="note">Un document sans niveau ni filière est accessible à tous les étudiants.</div>
@@ -759,6 +760,72 @@ const ADMIN_PASS="Admin@2026";
 
 const SENT="Votre demande est bien transmise.";
 
+/* ---- SYNCHRONISATION EN LIGNE (Firebase Realtime Database) ----
+   Collez ici l'URL de votre base, par exemple :
+   "https://mon-projet-default-rtdb.firebaseio.com"
+   Laissez vide pour rester en mode local (données propres à chaque téléphone). */
+const CLOUD_URL="";
+
+const COLS=["users","requests","notifs","communiques","votes","library","userfiles"];
+let snap={election:"null"},snapInit=false,pushing=0,pushSeq=0,refreshing=false,lastPush=Promise.resolve(true);
+function ck(c,it){return c==="votes"?it.studentId:it.id}
+function stamp(it){const m=String(it.id||"").match(/(\d{10,})/);return m?+m[1]:0}
+function cloudCols(){return {users,requests,notifs,communiques,votes,library,userfiles}}
+function syncNow(){return lastPush}
+async function cloudPull(){
+ if(!CLOUD_URL)return true;
+ if(pushing>0)return true;
+ const seq=pushSeq;
+ try{
+  const r=await fetch(CLOUD_URL.replace(/\/$/,"")+"/data.json",{cache:"no-store"});
+  if(!r.ok)throw new Error("http "+r.status);
+  const d=(await r.json())||{};
+  if(pushing>0||seq!==pushSeq)return true;
+  if(!Object.keys(d).length&&!snapInit){
+   /* base vide au premier lancement : on y envoie les données déjà présentes sur cet appareil */
+   readAll();
+   snapInit=true;
+   await cloudPush();
+   return true;
+  }
+  for(const c of COLS){
+   const m=d[c]||{};
+   const arr=Object.keys(m).map(k=>m[k]);
+   if(c!=="users"&&c!=="votes")arr.sort((a,b)=>stamp(b)-stamp(a));
+   snap[c]={};
+   Object.keys(m).forEach(k=>{snap[c][k]=JSON.stringify(m[k])});
+   localStorage.setItem("ameet_"+c,JSON.stringify(arr));
+  }
+  let el=d.election||null;
+  if(el&&!Array.isArray(el.candidates))el.candidates=el.candidates?Object.values(el.candidates):[];
+  snap.election=JSON.stringify(el);
+  localStorage.setItem("ameet_election",JSON.stringify(el));
+  snapInit=true;
+  readAll();
+  return true;
+ }catch(e){return false}
+}
+function cloudPush(){
+ if(!CLOUD_URL)return Promise.resolve(true);
+ const base=CLOUD_URL.replace(/\/$/,""),ops=[],cols=cloudCols();
+ for(const c of COLS){
+  const cur={};
+  cols[c].forEach(it=>{const k=ck(c,it);if(k)cur[k]=it});
+  const old=snap[c]||{};
+  for(const k in cur){const s=JSON.stringify(cur[k]);if(old[k]!==s){ops.push(["PUT","/data/"+c+"/"+encodeURIComponent(k)+".json",s]);old[k]=s}}
+  for(const k in old){if(!(k in cur)){ops.push(["DELETE","/data/"+c+"/"+encodeURIComponent(k)+".json"]);delete old[k]}}
+  snap[c]=old;
+ }
+ const es=JSON.stringify(election);
+ if(snap.election!==es){ops.push(es==="null"?["DELETE","/data/election.json"]:["PUT","/data/election.json",es]);snap.election=es}
+ if(!ops.length)return Promise.resolve(true);
+ pushSeq++;pushing++;
+ return Promise.all(ops.map(o=>fetch(base+o[1],{method:o[0],body:o[2],headers:{"Content-Type":"application/json"}}).then(r=>{if(!r.ok)throw new Error("http")})))
+  .then(()=>true)
+  .catch(()=>{toast("Serveur injoignable : modifications non synchronisées.");return false})
+  .finally(()=>{pushing--});
+}
+
 /* ---- ÉTAT ---- */
 let users=[],requests=[],notifs=[],communiques=[],election=null,votes=[],library=[],userfiles=[],comImages=[],current=null,editComId=null;
 let housingData=null,selectedContest="",selectedMonth="",lastReqId=null,openReqId=null,lastUnread=0;
@@ -806,6 +873,7 @@ function save(){
   localStorage.setItem("ameet_votes",JSON.stringify(votes));
   localStorage.setItem("ameet_library",JSON.stringify(library));
   localStorage.setItem("ameet_userfiles",JSON.stringify(userfiles));
+  lastPush=cloudPush();
   return true;
  }catch(e){
   toast("Stockage plein : réduisez le nombre ou la taille des images.");
@@ -813,17 +881,23 @@ function save(){
  }
 }
 
-window.addEventListener("load",()=>{
+window.addEventListener("load",async()=>{
  setTimeout(()=>document.getElementById("splash").classList.add("hide"),1800);
+ if(!CLOUD_URL)document.getElementById("localWarn").classList.remove("hidden");
+ document.querySelectorAll(".maxmb").forEach(e=>e.textContent=MAX_MB);
+ if(CLOUD_URL)await cloudPull();
  loadAll();
  renderContests();
  fillFilters();
  if(current){current.admin?openAdmin():openApp()}
- window.addEventListener("storage",refreshLive);
- setInterval(refreshLive,5000);
+ window.addEventListener("storage",()=>refreshLive(true));
+ setInterval(()=>refreshLive(),CLOUD_URL?8000:5000);
 });
 
-function refreshLive(){
+async function refreshLive(noPull){
+ if(refreshing)return;
+ refreshing=true;
+ try{if(CLOUD_URL&&!noPull)await cloudPull()}finally{refreshing=false}
  loadAll();
  if(!current)return;
  if(current.admin){renderAdmin()}
@@ -845,7 +919,8 @@ function genId(){
  return id;
 }
 
-function createAccount(){
+async function createAccount(){
+ if(CLOUD_URL&&!(await cloudPull()))return toast("Connexion au serveur impossible. Vérifiez votre connexion internet.");
  loadAll();
  const prenom=v("rPrenom"),nom=v("rNom"),faculte=v("rFaculte"),departement=v("rDepartement"),niveau=v("rNiveau"),telephone=v("rTelephone"),email=v("rEmail");
  if(!prenom||!nom||!faculte||!departement||!niveau||!telephone||!email)return toast("Veuillez remplir tous les champs.");
@@ -854,7 +929,14 @@ function createAccount(){
  const id=genId(),pass="ameet"+new Date().getFullYear();
  users.push({id,password:pass,prenom,nom,faculte,departement,niveau,telephone,email,createdAt:new Date().toLocaleString("fr-FR")});
  pushNotif(id,"Bienvenue sur AMEET","Votre compte a été créé avec succès. Vous recevrez ici les réponses de l'administration.");
- save();
+ if(!save())return;
+ if(CLOUD_URL){
+  const ok=await syncNow();
+  if(!ok){
+   users=users.filter(u=>u.id!==id);notifs=notifs.filter(n=>n.studentId!==id);save();
+   return toast("Impossible d'enregistrer le compte sur le serveur. Réessayez.");
+  }
+ }
  document.getElementById("genId").textContent=id;
  document.getElementById("genPass").textContent=pass;
  document.getElementById("generated").classList.add("show");
@@ -864,7 +946,8 @@ function createAccount(){
  toast("Compte AMEET créé avec succès.");
 }
 
-function login(){
+async function login(){
+ if(CLOUD_URL&&!(await cloudPull()))return toast("Connexion au serveur impossible. Vérifiez votre connexion internet.");
  loadAll();
  const id=v("loginId").toUpperCase(),pass=v("loginPassword");
  if(id===ADMIN_ID.toUpperCase()&&pass===ADMIN_PASS){
@@ -1411,8 +1494,9 @@ function voteFor(cid){
 }
 
 /* ---- FICHIERS (IndexedDB) ---- */
-const MAX_FILE=10*1024*1024;
-const FDB={
+const MAX_MB=CLOUD_URL?5:10;
+const MAX_FILE=MAX_MB*1024*1024;
+const LDB={
  db:null,
  open(){return new Promise((res,rej)=>{
   if(this.db)return res(this.db);
@@ -1425,6 +1509,27 @@ const FDB={
  async put(k,blob){const db=await this.open();return new Promise((res,rej)=>{const tx=db.transaction("files","readwrite");tx.objectStore("files").put(blob,k);tx.oncomplete=()=>res();tx.onerror=()=>rej(tx.error)})},
  async get(k){const db=await this.open();return new Promise((res,rej)=>{const rq=db.transaction("files","readonly").objectStore("files").get(k);rq.onsuccess=()=>res(rq.result);rq.onerror=()=>rej(rq.error)})},
  async del(k){const db=await this.open();return new Promise((res,rej)=>{const tx=db.transaction("files","readwrite");tx.objectStore("files").delete(k);tx.oncomplete=()=>res();tx.onerror=()=>rej(tx.error)})}
+};
+function blobToDataURL(b){return new Promise((res,rej)=>{const fr=new FileReader();fr.onload=()=>res(fr.result);fr.onerror=()=>rej(fr.error);fr.readAsDataURL(b)})}
+function fk(k){return k.replace(/[^A-Za-z0-9_-]/g,"_")}
+const FDB={
+ async put(k,blob){
+  if(!CLOUD_URL)return LDB.put(k,blob);
+  const d=await blobToDataURL(blob);
+  const r=await fetch(CLOUD_URL.replace(/\/$/,"")+"/files/"+fk(k)+".json",{method:"PUT",body:JSON.stringify({d,t:blob.type||""})});
+  if(!r.ok)throw new Error("put");
+ },
+ async get(k){
+  if(!CLOUD_URL)return LDB.get(k);
+  const r=await fetch(CLOUD_URL.replace(/\/$/,"")+"/files/"+fk(k)+".json");
+  if(!r.ok)throw new Error("get");
+  const o=await r.json();
+  return o?await (await fetch(o.d)).blob():null;
+ },
+ async del(k){
+  if(!CLOUD_URL)return LDB.del(k);
+  await fetch(CLOUD_URL.replace(/\/$/,"")+"/files/"+fk(k)+".json",{method:"DELETE"});
+ }
 };
 function fmtSize(n){n=n||0;return n<1024?n+" o":n<1048576?Math.round(n/1024)+" Ko":(n/1048576).toFixed(1)+" Mo"}
 async function saveBlob(blob,name){
@@ -1470,7 +1575,7 @@ async function addComImages(inp){
  for(const f of files){
   if(comImages.length>=4){toast("4 images maximum par communiqué.");break}
   if(!f.type.startsWith("image/")){toast("Seules les images sont acceptées.");continue}
-  try{comImages.push(await imgToDataURL(f,1100,.8,false))}catch(e){toast("Image illisible : "+f.name)}
+  try{comImages.push(await imgToDataURL(f,900,.7,false))}catch(e){toast("Image illisible : "+f.name)}
  }
  renderThumbs();
 }
@@ -1509,7 +1614,7 @@ async function addLibDoc(){
  const title=v("lbTitle"),desc=v("lbDesc"),niveau=document.getElementById("lbNiveau").value,filiere=v("lbFiliere"),f=document.getElementById("lbFile").files[0];
  if(!title)return toast("Donnez un titre au document.");
  if(!f)return toast("Sélectionnez un fichier.");
- if(f.size>MAX_FILE)return toast("Fichier trop volumineux (10 Mo maximum).");
+ if(f.size>MAX_FILE)return toast("Fichier trop volumineux ("+MAX_MB+" Mo maximum).");
  const id="DOC-"+Date.now();
  try{await FDB.put("lib:"+id,f)}catch(e){return toast("Impossible d'enregistrer le fichier sur cet appareil.")}
  reloadData();
@@ -1549,7 +1654,7 @@ async function changePhoto(inp){
  if(!f)return;
  if(!f.type.startsWith("image/"))return toast("Choisissez une image.");
  try{
-  const url=await imgToDataURL(f,320,.85,true);
+  const url=await imgToDataURL(f,200,.75,true);
   reloadData();
   const u=users.find(x=>x.id===current.id);if(!u)return;
   u.photo=url;
@@ -1566,7 +1671,7 @@ async function uploadUserFile(){
  const kind=document.getElementById("ufKind").value,f=document.getElementById("ufFile").files[0];
  if(!kind)return toast("Choisissez le type de document.");
  if(!f)return toast("Sélectionnez un fichier.");
- if(f.size>MAX_FILE)return toast("Fichier trop volumineux (10 Mo maximum).");
+ if(f.size>MAX_FILE)return toast("Fichier trop volumineux ("+MAX_MB+" Mo maximum).");
  const id="UF-"+Date.now();
  try{await FDB.put("usr:"+id,f)}catch(e){return toast("Impossible d'enregistrer le fichier sur cet appareil.")}
  reloadData();
