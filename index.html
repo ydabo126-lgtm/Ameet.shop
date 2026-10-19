@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#2439a6">
+<link rel="apple-touch-icon" href="logo.png">
 <title>AMEET — Espace Étudiant</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -282,6 +283,7 @@ button{cursor:pointer}
   </div>
 
   <div id="localWarn" class="hidden" style="background:#fff4df;color:#9a5d00;border-radius:12px;padding:10px 12px;font-size:11px;line-height:1.5;margin-bottom:16px">Mode local : les comptes ne sont enregistrés que sur cet appareil. Renseignez CLOUD_URL dans le code pour les partager entre tous les téléphones.</div>
+  <div id="cloudStatus" class="hidden" style="border-radius:12px;padding:10px 12px;font-size:11px;line-height:1.5;margin-bottom:16px"></div>
   <div class="login" id="loginForm">
     <div class="auth-title">Connexion à votre compte</div>
     <div class="auth-desc">Accédez à votre espace AMEET.</div>
@@ -373,6 +375,7 @@ button{cursor:pointer}
   <button class="back" onclick="showPage('homePage')">← Retour</button>
   <div class="page-head"><h2>Notifications</h2><p>Réponses et messages de l'administration AMEET.</p></div>
   <div class="card">
+    <div id="sysNotifBox"></div>
     <button class="btn light" style="margin-bottom:14px" onclick="markAllRead()"><svg class="ic"><use href="#i-check"/></svg>Tout marquer comme lu</button>
     <div id="notifList"></div>
   </div>
@@ -590,7 +593,7 @@ button{cursor:pointer}
   <div class="topbar-inner">
     <div class="brand">
       <img src="logo.png" alt="logo" style="width: 45px; height: 45px; border-radius: 10px; object-fit: cover;">
-      <div><div class="brand-name">AMEET Admin</div><div class="brand-sub">Espace administrateur</div></div>
+      <div><div class="brand-name">AMEET Admin</div><div class="brand-sub" id="adminSub">Espace administrateur</div></div>
     </div>
     <div class="user"><div class="avatar">AD</div><button class="logout" onclick="logout()">Déconnexion</button></div>
   </div>
@@ -708,6 +711,7 @@ button{cursor:pointer}
 
 <section class="page" id="aNot">
   <div class="page-head"><h2>Envoyer une notification</h2><p>Message direct à un étudiant ou annonce à tous.</p></div>
+  <div id="sysNotifBoxA"></div>
   <div class="card">
     <div class="group"><label>Destinataire</label><select id="nTarget" class="input"></select></div>
     <div class="group"><label>Titre</label><input id="nTitle" class="input" placeholder="Ex : Réunion générale"></div>
@@ -764,9 +768,16 @@ const SENT="Votre demande est bien transmise.";
    Collez ici l'URL de votre base, par exemple :
    "https://mon-projet-default-rtdb.firebaseio.com"
    Laissez vide pour rester en mode local (données propres à chaque téléphone). */
-const CLOUD_URL="";
+const CLOUD_URL="https://ameet-d2a23-default-rtdb.europe-west1.firebasedatabase.app";
 
+function cloudBase(){
+ let u=String(CLOUD_URL||"").trim();
+ if(!u)return "";
+ if(!/^https?:\/\//i.test(u))u="https://"+u;
+ return u.replace(/\.json.*$/,"").replace(/\/+$/,"").replace(/\/data$/,"");
+}
 const COLS=["users","requests","notifs","communiques","votes","library","userfiles"];
+let cloudErr="";
 let snap={election:"null"},snapInit=false,pushing=0,pushSeq=0,refreshing=false,lastPush=Promise.resolve(true);
 function ck(c,it){return c==="votes"?it.studentId:it.id}
 function stamp(it){const m=String(it.id||"").match(/(\d{10,})/);return m?+m[1]:0}
@@ -777,7 +788,7 @@ async function cloudPull(){
  if(pushing>0)return true;
  const seq=pushSeq;
  try{
-  const r=await fetch(CLOUD_URL.replace(/\/$/,"")+"/data.json",{cache:"no-store"});
+  const r=await fetch(cloudBase()+"/data.json",{cache:"no-store"});
   if(!r.ok)throw new Error("http "+r.status);
   const d=(await r.json())||{};
   if(pushing>0||seq!==pushSeq)return true;
@@ -803,11 +814,17 @@ async function cloudPull(){
   snapInit=true;
   readAll();
   return true;
- }catch(e){return false}
+ }catch(e){cloudErr=String((e&&e.message)||e);return false}
+}
+function setCloudStatus(ok){
+ const e=document.getElementById("cloudStatus"),a=document.getElementById("adminSub");
+ if(!CLOUD_URL){if(a)a.textContent="Espace administrateur · MODE LOCAL (non partagé)";return}
+ if(e){e.classList.remove("hidden");e.style.background=ok?"#eaf9f3":"#fdecef";e.style.color=ok?"#067a52":"#b02a40";e.textContent=ok?"Connecté au serveur : les comptes sont partagés entre tous les téléphones.":"Serveur injoignable ("+cloudErr+"). Vérifiez CLOUD_URL et les règles de la base."}
+ if(a)a.textContent="Espace administrateur · "+(ok?"en ligne":"hors ligne");
 }
 function cloudPush(){
  if(!CLOUD_URL)return Promise.resolve(true);
- const base=CLOUD_URL.replace(/\/$/,""),ops=[],cols=cloudCols();
+ const base=cloudBase(),ops=[],cols=cloudCols();
  for(const c of COLS){
   const cur={};
   cols[c].forEach(it=>{const k=ck(c,it);if(k)cur[k]=it});
@@ -881,12 +898,146 @@ function save(){
  }
 }
 
+/* ---- DÉCONNEXION AUTOMATIQUE (5 min hors du site) ---- */
+const IDLE_MS=5*60*1000;
+function touchSeen(){try{localStorage.setItem("ameet_seen",String(Date.now()))}catch(e){}}
+function idleExpired(){const s=+localStorage.getItem("ameet_seen")||0;return !!(s&&Date.now()-s>IDLE_MS)}
+function idleCheck(){
+ if(current&&idleExpired()){logout();toast("Session expirée après 5 minutes d'absence. Reconnectez-vous.");return true}
+ return false;
+}
+document.addEventListener("visibilitychange",()=>{
+ if(document.hidden){touchSeen()}
+ else{loadAll();if(!idleCheck())touchSeen()}
+});
+window.addEventListener("pagehide",touchSeen);
+setInterval(()=>{if(!document.hidden&&current)touchSeen()},15000);
+
+/* ---- APPLICATION INSTALLABLE : manifeste intégré à ce fichier ---- */
+(function(){
+ try{
+  const base=location.href.split("#")[0].split("?")[0];
+  const m={name:"AMEET — Espace Étudiant",short_name:"AMEET",start_url:base,scope:base.replace(/[^\/]*$/,""),display:"standalone",background_color:"#2439a6",theme_color:"#2439a6",
+   icons:[{src:new URL("logo.png",base).href,sizes:"192x192",type:"image/png"},{src:new URL("logo.png",base).href,sizes:"512x512",type:"image/png"}]};
+  const l=document.createElement("link");
+  l.rel="manifest";
+  l.href="data:application/manifest+json,"+encodeURIComponent(JSON.stringify(m));
+  document.head.appendChild(l);
+ }catch(e){}
+})();
+
+/* Code du service worker (sw.js). Les navigateurs imposent un fichier séparé pour l'enregistrer :
+   le bouton « Télécharger sw.js » de l'espace admin le régénère depuis ce texte. */
+const SW_SOURCE=`/* Service worker AMEET : affiche les notifications dans la barre du téléphone */
+self.addEventListener("install",e=>self.skipWaiting());
+self.addEventListener("activate",e=>e.waitUntil(self.clients.claim()));
+
+/* Prêt pour de vraies notifications push (application fermée) si un serveur push est ajouté */
+self.addEventListener("push",e=>{
+ let d={};
+ try{d=e.data?e.data.json():{}}catch(_){d={title:"AMEET",body:e.data?e.data.text():""}}
+ e.waitUntil(self.registration.showNotification(d.title||"AMEET",{
+  body:d.body||"",icon:"logo.png",badge:"logo.png",data:{url:d.url||"./"}
+ }));
+});
+
+self.addEventListener("notificationclick",e=>{
+ e.notification.close();
+ const url=(e.notification.data&&e.notification.data.url)||"./";
+ e.waitUntil(self.clients.matchAll({type:"window",includeUncontrolled:true}).then(list=>{
+  for(const c of list){if("focus" in c)return c.focus()}
+  return self.clients.openWindow(url);
+ }));
+});
+`;
+function downloadSW(){
+ const a=document.createElement("a");
+ a.href=URL.createObjectURL(new Blob([SW_SOURCE],{type:"text/javascript"}));
+ a.download="sw.js";document.body.appendChild(a);a.click();a.remove();
+ setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+}
+
+/* ---- NOTIFICATIONS DU TÉLÉPHONE (barre de notifications) ---- */
+function sysSupported(){return "Notification" in window}
+async function registerSW(){
+ if(!("serviceWorker" in navigator))return null;
+ try{return await navigator.serviceWorker.register("sw.js")}catch(e){return null}
+}
+async function sysNotify(title,body,tag){
+ if(!sysSupported()||Notification.permission!=="granted")return;
+ const opt={body:String(body||"").slice(0,180),tag,icon:"logo.png",badge:"logo.png",data:{url:"./"}};
+ try{
+  const reg=("serviceWorker" in navigator)?await navigator.serviceWorker.getRegistration():null;
+  if(reg&&reg.showNotification)return await reg.showNotification(title,opt);
+  new Notification(title,opt);
+ }catch(e){}
+}
+function notifyTarget(){return current&&current.admin?{admin:true}:current?{id:current.id}:null}
+function pendingItems(who){
+ if(who.admin)return requests.filter(r=>["en_attente","a_verifier"].includes(r.status)).map(r=>({id:r.id,title:"Nouvelle demande : "+r.type,body:nameOf(r.studentId)}));
+ return notifs.filter(n=>n.studentId===who.id&&!n.read).map(n=>({id:n.id,title:n.title,body:n.text}));
+}
+function baselineNotified(){
+ const who=readLS("ameet_notify",null);if(!who)return;
+ const done=new Set(readLS("ameet_notified",[]));
+ pendingItems(who).forEach(x=>done.add(x.id));
+ localStorage.setItem("ameet_notified",JSON.stringify([...done].slice(-400)));
+}
+function retargetNotify(){
+ if(!sysSupported()||Notification.permission!=="granted")return;
+ const old=readLS("ameet_notify",null);if(!old)return;
+ const nw=notifyTarget();if(!nw)return;
+ if(JSON.stringify(old)!==JSON.stringify(nw)){localStorage.setItem("ameet_notify",JSON.stringify(nw));baselineNotified()}
+}
+function checkSystemNotifs(){
+ if(!sysSupported()||Notification.permission!=="granted")return;
+ const who=readLS("ameet_notify",null);if(!who)return;
+ const done=new Set(readLS("ameet_notified",[]));
+ const fresh=pendingItems(who).filter(x=>!done.has(x.id));
+ if(!fresh.length)return;
+ fresh.forEach(x=>done.add(x.id));
+ localStorage.setItem("ameet_notified",JSON.stringify([...done].slice(-400)));
+ if(!document.hidden&&current)return;
+ if(fresh.length>3)sysNotify("AMEET",fresh.length+" nouvelles notifications","ameet-batch");
+ else fresh.forEach(x=>sysNotify(x.title,x.body,x.id));
+}
+async function enableSysNotifs(){
+ if(!sysSupported())return toast("Ce navigateur ne gère pas les notifications.");
+ let perm=Notification.permission;
+ if(perm==="default")perm=await Notification.requestPermission();
+ if(perm!=="granted"){updateNotifButtons();return toast("Notifications refusées : autorisez-les dans les réglages du navigateur.")}
+ await registerSW();
+ localStorage.setItem("ameet_notify",JSON.stringify(notifyTarget()));
+ baselineNotified();
+ updateNotifButtons();
+ sysNotify("Alertes activées","Vous serez prévenu des nouveautés AMEET.","ameet-on");
+ toast("Alertes du téléphone activées.");
+}
+function disableSysNotifs(){
+ localStorage.removeItem("ameet_notify");
+ updateNotifButtons();toast("Alertes du téléphone désactivées.");
+}
+function updateNotifButtons(){
+ ["sysNotifBox","sysNotifBoxA"].forEach(id=>{
+  const el=document.getElementById(id);if(!el)return;
+  if(!sysSupported()){el.innerHTML='<div class="member wait"><div>Ce navigateur ne gère pas les notifications du téléphone.</div></div>';return}
+  if(Notification.permission==="denied"){el.innerHTML=`<div class="member wait">${ic("bell")}<div><strong>Notifications bloquées</strong>Autorisez-les pour ce site dans les réglages du navigateur.</div></div>`;return}
+  if(Notification.permission==="granted"&&readLS("ameet_notify",null))
+   el.innerHTML=`<div class="member ok">${ic("check")}<div style="flex:1"><strong>Alertes du téléphone activées</strong>Vous êtes prévenu même hors de votre compte.</div><button class="mini" onclick="disableSysNotifs()">Désactiver</button></div>`;
+  else
+   el.innerHTML=`<div class="member wait">${ic("bell")}<div style="flex:1"><strong>Recevoir les alertes sur le téléphone</strong>Activez les notifications pour être prévenu des nouveautés.</div><button class="mini" onclick="enableSysNotifs()">Activer</button></div>`;
+ });
+ const ad=document.getElementById("sysNotifBoxA");
+ if(ad)ad.insertAdjacentHTML("beforeend",`<div style="margin:-6px 0 14px;font-size:10px;color:var(--muted);line-height:1.6">Alertes sur Android : le fichier sw.js doit se trouver à côté de index.html. <button class="mini" onclick="downloadSW()">${ic("download")}Télécharger sw.js</button></div>`);
+}
+
 window.addEventListener("load",async()=>{
  setTimeout(()=>document.getElementById("splash").classList.add("hide"),1800);
  if(!CLOUD_URL)document.getElementById("localWarn").classList.remove("hidden");
  document.querySelectorAll(".maxmb").forEach(e=>e.textContent=MAX_MB);
- if(CLOUD_URL)await cloudPull();
+ if(CLOUD_URL)setCloudStatus(await cloudPull());else setCloudStatus();
  loadAll();
+ idleCheck();
  renderContests();
  fillFilters();
  if(current){current.admin?openAdmin():openApp()}
@@ -897,9 +1048,13 @@ window.addEventListener("load",async()=>{
 async function refreshLive(noPull){
  if(refreshing)return;
  refreshing=true;
- try{if(CLOUD_URL&&!noPull)await cloudPull()}finally{refreshing=false}
+ try{if(CLOUD_URL&&!noPull)setCloudStatus(await cloudPull())}finally{refreshing=false}
  loadAll();
- if(!current)return;
+ checkSystemNotifs();
+ if(!current){
+  if(document.getElementById("app").classList.contains("active")||document.getElementById("adminApp").classList.contains("active"))logout();
+  return;
+ }
  if(current.admin){renderAdmin()}
  else{
   renderHistory();renderNotifs();renderCommuniques();renderElection();renderLibrary();renderProfile();
@@ -920,7 +1075,7 @@ function genId(){
 }
 
 async function createAccount(){
- if(CLOUD_URL&&!(await cloudPull()))return toast("Connexion au serveur impossible. Vérifiez votre connexion internet.");
+ if(CLOUD_URL&&!(await cloudPull()))return (setCloudStatus(false),toast("Connexion au serveur impossible ("+cloudErr+"). Vérifiez CLOUD_URL et les règles de la base."));
  loadAll();
  const prenom=v("rPrenom"),nom=v("rNom"),faculte=v("rFaculte"),departement=v("rDepartement"),niveau=v("rNiveau"),telephone=v("rTelephone"),email=v("rEmail");
  if(!prenom||!nom||!faculte||!departement||!niveau||!telephone||!email)return toast("Veuillez remplir tous les champs.");
@@ -947,7 +1102,7 @@ async function createAccount(){
 }
 
 async function login(){
- if(CLOUD_URL&&!(await cloudPull()))return toast("Connexion au serveur impossible. Vérifiez votre connexion internet.");
+ if(CLOUD_URL&&!(await cloudPull()))return (setCloudStatus(false),toast("Connexion au serveur impossible ("+cloudErr+"). Vérifiez CLOUD_URL et les règles de la base."));
  loadAll();
  const id=v("loginId").toUpperCase(),pass=v("loginPassword");
  if(id===ADMIN_ID.toUpperCase()&&pass===ADMIN_PASS){
@@ -974,6 +1129,7 @@ function logout(){
 
 /* ---- ESPACE ÉTUDIANT ---- */
 function openApp(){
+ touchSeen();retargetNotify();updateNotifButtons();
  document.getElementById("authScreen").classList.add("hidden");
  document.getElementById("adminApp").classList.remove("active");
  document.getElementById("app").classList.add("active");
@@ -1167,6 +1323,7 @@ function renderHistory(){
 
 /* ---- INTERFACE ADMIN ---- */
 function openAdmin(){
+ touchSeen();retargetNotify();updateNotifButtons();
  document.getElementById("authScreen").classList.add("hidden");
  document.getElementById("app").classList.remove("active");
  document.getElementById("adminApp").classList.add("active");
@@ -1516,19 +1673,19 @@ const FDB={
  async put(k,blob){
   if(!CLOUD_URL)return LDB.put(k,blob);
   const d=await blobToDataURL(blob);
-  const r=await fetch(CLOUD_URL.replace(/\/$/,"")+"/files/"+fk(k)+".json",{method:"PUT",body:JSON.stringify({d,t:blob.type||""})});
+  const r=await fetch(cloudBase()+"/files/"+fk(k)+".json",{method:"PUT",body:JSON.stringify({d,t:blob.type||""})});
   if(!r.ok)throw new Error("put");
  },
  async get(k){
   if(!CLOUD_URL)return LDB.get(k);
-  const r=await fetch(CLOUD_URL.replace(/\/$/,"")+"/files/"+fk(k)+".json");
+  const r=await fetch(cloudBase()+"/files/"+fk(k)+".json");
   if(!r.ok)throw new Error("get");
   const o=await r.json();
   return o?await (await fetch(o.d)).blob():null;
  },
  async del(k){
   if(!CLOUD_URL)return LDB.del(k);
-  await fetch(CLOUD_URL.replace(/\/$/,"")+"/files/"+fk(k)+".json",{method:"DELETE"});
+  await fetch(cloudBase()+"/files/"+fk(k)+".json",{method:"DELETE"});
  }
 };
 function fmtSize(n){n=n||0;return n<1024?n+" o":n<1048576?Math.round(n/1024)+" Ko":(n/1048576).toFixed(1)+" Mo"}
